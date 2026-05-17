@@ -22,8 +22,122 @@ import {
 
 export type EmitterOptions = BaseEmitterOptions;
 
+let _tmpCounter = 0;
+function nextTmp(): string {
+  return `_tmp${_tmpCounter++}`;
+}
+
 function fieldRb(name: string): string {
   return safeFieldName("ruby", toSnakeCase(name));
+}
+
+// ── RBS type helpers ──────────────────────────────────────────────────────────
+
+function rbsType(type: Type, optional?: boolean): string {
+  const base = rbsTypeBase(type);
+  return optional ? `${base}?` : base;
+}
+
+function rbsTypeBase(type: Type): string {
+  const n = scalarName(type);
+  if (n) {
+    switch (n) {
+      case "string": return "String";
+      case "boolean": return "bool";
+      case "int8": case "int16": case "int32": case "int64":
+      case "uint8": case "uint16": case "uint32": case "uint64":
+      case "integer": return "Integer";
+      case "float32": case "float64": case "float": case "decimal": return "Float";
+      case "bytes": return "String";
+    }
+  }
+  if (isArrayType(type)) {
+    return `Array[${rbsType(arrayElementType(type)!)}]`;
+  }
+  if (isRecordType(type)) {
+    return `Hash[String, ${rbsType(recordElementType(type)!)}]`;
+  }
+  if (type.kind === "Enum") return "String";
+  if (type.kind === "Model" && (type as Model).name) return (type as Model).name!;
+  if (type.kind === "Union" && (type as Union).name) return (type as Union).name!;
+  return "untyped";
+}
+
+function rbsInitParam(f: { name: string; type: Type; optional?: boolean }): string {
+  const ft = rbsType(f.type, f.optional);
+  const sn = fieldRb(f.name);
+  return f.optional ? `?${sn}: ${ft}` : `${sn}: ${ft}`;
+}
+
+// ── RBS emit functions ───────────────────────────────────────────────────────
+
+function emitModelRbs(m: Model, L: string[]): void {
+  if (!m.name) return;
+  const fields = extractFields(m);
+  const sn = toSnakeCase(m.name);
+
+  L.push(`class ${m.name}`);
+  for (const f of fields) {
+    L.push(`  attr_accessor ${fieldRb(f.name)}: ${rbsType(f.type, f.optional)}`);
+  }
+  L.push("");
+  if (fields.length > 0) {
+    L.push(`  def initialize: (${fields.map(rbsInitParam).join(", ")}) -> void`);
+  }
+  L.push(`end`);
+  L.push("");
+
+  L.push(`module ${m.name}Methods`);
+  L.push(`  def self.write_${sn}: (Specodec::SpecWriter, ${m.name}) -> void`);
+  L.push(`  def self.decode_${sn}: (Specodec::SpecReader) -> ${m.name}`);
+  L.push(`end`);
+  L.push("");
+
+  L.push(`${m.name}Codec: Specodec::SpecCodec[${m.name}]`);
+  L.push("");
+}
+
+function emitEnumRbs(e: EnumInfo, L: string[]): void {
+  const members = e.members.map((em) => `${em.name}: ${em.value}`).join("\n  ");
+  L.push(`module ${e.name}`);
+  L.push(`  ${members}`);
+  L.push(`end`);
+  L.push("");
+}
+
+function emitUnionRbs(u: UnionInfo, L: string[]): void {
+  const snakeName = toSnakeCase(u.name);
+  const undefCls = `${u.name}Undefined`;
+  const variantTypes: string[] = [];
+
+  for (const v of u.variants) {
+    const pascal = v.name.charAt(0).toUpperCase() + v.name.slice(1);
+    const wrapper = `${u.name}${pascal}`;
+    const vt = rbsType(v.type);
+    variantTypes.push(wrapper);
+    L.push(`class ${wrapper}`);
+    L.push(`  attr_accessor value: ${vt}`);
+    L.push(`  def initialize: (${vt} value) -> void`);
+    L.push(`end`);
+    L.push("");
+  }
+
+  variantTypes.push(undefCls);
+  L.push(`class ${undefCls}`);
+  L.push(`  attr_accessor value: Specodec::SpecUndefined`);
+  L.push(`  def initialize: (?Specodec::SpecUndefined value) -> void`);
+  L.push(`end`);
+  L.push("");
+
+  const variantUnion = variantTypes.join(" | ");
+  L.push(`module ${u.name}Methods`);
+  L.push(`  def self.write_${snakeName}: (Specodec::SpecWriter, ${variantUnion}) -> void`);
+  L.push(`  def self.decode_${snakeName}: (Specodec::SpecReader) -> (${variantUnion})`);
+  L.push(`end`);
+  L.push("");
+
+  L.push(`${u.name}Codec: Specodec::SpecCodec[${variantUnion}]`);
+  L.push("");
 }
 
 function rbDefault(type: Type): string {
@@ -100,20 +214,6 @@ function readExpr(type: Type, optional?: boolean): string {
   if (n === "uint64") return "r.read_uint64";
   if (n === "float32") return "r.read_float32";
   if (["float64", "float", "decimal"].includes(n)) return "r.read_float64";
-  if (isArrayType(type)) {
-    const elem = arrayElementType(type)!;
-    const readE = readExpr(elem);
-    const expr = `->(r) { arr = []; r.begin_array; arr << ${readE} while r.has_next_element; r.end_array; arr }.call(r)`;
-    if (optional) return `r.is_null ? r.read_null : ${expr}`;
-    return expr;
-  }
-  if (isRecordType(type)) {
-    const elem = recordElementType(type)!;
-    const readE = readExpr(elem);
-    const expr = `->(r) { map = {}; r.begin_object; map[r.read_field_name] = ${readE} while r.has_next_field; r.end_object; map }.call(r)`;
-    if (optional) return `r.is_null ? r.read_null : ${expr}`;
-    return expr;
-  }
   if (type.kind === "Enum") return "r.read_string";
   if (type.kind === "Model" && (type as Model).name) {
     const name = (type as Model).name;
@@ -128,6 +228,28 @@ function readExpr(type: Type, optional?: boolean): string {
     return `${name}Methods.decode_${sn}(r)`;
   }
   return "r.read_string";
+}
+
+function generateFieldRead(L: string[], f: { name: string; type: any; optional: boolean }, varName: string, indent: string): void {
+  const tmp = nextTmp();
+  if (f.optional) {
+    L.push(`${indent}if r.is_null then r.read_null; ${varName} = nil; next; end`);
+  }
+  if (isArrayType(f.type)) {
+    const elem = arrayElementType(f.type)!;
+    L.push(`${indent}${tmp} = []`);
+    L.push(`${indent}r.begin_array`);
+    L.push(`${indent}${tmp} << ${readExpr(elem)} while r.has_next_element`);
+    L.push(`${indent}r.end_array`);
+    L.push(`${indent}${varName} = ${tmp}`);
+  } else if (isRecordType(f.type)) {
+    const elem = recordElementType(f.type)!;
+    L.push(`${indent}${tmp} = {}`);
+    L.push(`${indent}r.begin_object`);
+    L.push(`${indent}${tmp}[r.read_field_name] = ${readExpr(elem)} while r.has_next_field`);
+    L.push(`${indent}r.end_object`);
+    L.push(`${indent}${varName} = ${tmp}`);
+  }
 }
 
 function emitModelClass(m: Model, L: string[]): void {
@@ -184,7 +306,15 @@ function emitModelClass(m: Model, L: string[]): void {
   L.push(`    while r.has_next_field`);
   L.push(`      key = r.read_field_name`);
   for (const f of fields) {
-    L.push(`      if key == "${f.name}" then obj.${fieldRb(f.name)} = ${readExpr(f.type, f.optional)}; next; end`);
+    const fRb = fieldRb(f.name);
+    if (isArrayType(f.type) || isRecordType(f.type)) {
+      L.push(`      if key == "${f.name}"`);
+      generateFieldRead(L, f, `obj.${fRb}`, "        ");
+      L.push(`        next`);
+      L.push(`      end`);
+    } else {
+      L.push(`      if key == "${f.name}" then obj.${fRb} = ${readExpr(f.type, f.optional)}; next; end`);
+    }
   }
   L.push(`      r.skip`);
   L.push(`    end`);
@@ -319,9 +449,53 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
 
     L.push("");
 
+    // ── RBS lines (generated in parallel) ──────────────────────────────────
+    const RbsL: string[] = [];
+    RbsL.push("# Generated by @specodec/typespec-emitter-ruby. DO NOT EDIT.");
+    RbsL.push("");
+    RbsL.push("require 'specodec'");
+
+    const rbsXrefNs = new Set<string>();
+    for (const m of svc.models) {
+      if (!m.name) continue;
+      for (const f of extractFields(m)) {
+        const collectR = (t: Type) => {
+          if ((t.kind === "Model" || t.kind === "Enum") && (t as any).name) {
+            const ns = rbModelNs.get((t as any).name);
+            if (ns && ns !== svc.serviceName) rbsXrefNs.add(ns);
+          }
+          if (isArrayType(t)) collectR(arrayElementType(t)!);
+          if (isRecordType(t)) collectR(recordElementType(t)!);
+        };
+        collectR(f.type);
+      }
+    }
+    for (const u of svc.unions) {
+      for (const v of u.variants) {
+        const collectR = (t: Type) => {
+          if ((t.kind === "Model" || t.kind === "Enum") && (t as any).name) {
+            const ns = rbModelNs.get((t as any).name);
+            if (ns && ns !== svc.serviceName) rbsXrefNs.add(ns);
+          }
+          if (isArrayType(t)) collectR(arrayElementType(t)!);
+          if (isRecordType(t)) collectR(recordElementType(t)!);
+        };
+        collectR(v.type);
+      }
+    }
+    for (const ns of [...rbsXrefNs].sort()) {
+      RbsL.push(`require_relative '${dottedPathToSnakeCase(ns)}_types'`);
+    }
+
+    RbsL.push("");
+
     for (const m of svc.models) emitModelClass(m, L);
     for (const e of svc.enums) { L.push(...generateEnumCode(e)); L.push(""); }
     for (const u of svc.unions) generateUnionCode(u, L);
+
+    for (const m of svc.models) emitModelRbs(m, RbsL);
+    for (const e of svc.enums) emitEnumRbs(e, RbsL);
+    for (const u of svc.unions) emitUnionRbs(u, RbsL);
 
     // Codec registrations
     for (const m of svc.models) {
@@ -344,8 +518,11 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
       L.push("");
     }
 
-    const fileName = `${dottedPathToSnakeCase(svc.serviceName)}_types.rb`;
+    const baseName = dottedPathToSnakeCase(svc.serviceName);
+    const fileName = `${baseName}_types.rb`;
+    const rbsFileName = `${baseName}_types.rbs`;
     await emitFile(program, { path: `${outputDir}/${fileName}`, content: L.join("\n") });
+    await emitFile(program, { path: `${outputDir}/${rbsFileName}`, content: RbsL.join("\n") });
   }
 
   let barrelContent = "# frozen_string_literal: true\n\n# Generated by @specodec/typespec-emitter-ruby. DO NOT EDIT.\n\n";
