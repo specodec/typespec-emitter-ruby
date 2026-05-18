@@ -24,7 +24,7 @@ export type EmitterOptions = BaseEmitterOptions;
 
 let _tmpCounter = 0;
 function nextTmp(): string {
-  return `_tmp`;
+  return `tmp`;
 }
 
 function fieldRb(name: string): string {
@@ -203,7 +203,7 @@ function writeLines(type: Type, varExpr: string, indent: string): string[] {
   return [`${indent}w.write_string(${varExpr}.to_s)`];
 }
 
-function readExpr(type: Type, optional?: boolean): string {
+function readExpr(type: Type): string {
   const n = scalarName(type);
   if (n === "string") return "r.read_string";
   if (n === "bytes") return "r.read_bytes";
@@ -218,38 +218,75 @@ function readExpr(type: Type, optional?: boolean): string {
   if (type.kind === "Model" && (type as Model).name) {
     const name = (type as Model).name;
     const sn = toSnakeCase(name);
-    if (optional) return `r.is_null ? r.read_null : ${name}Methods.decode_${sn}(r)`;
     return `${name}Methods.decode_${sn}(r)`;
   }
   if (type.kind === "Union") {
     const name = (type as Union).name!;
     const sn = toSnakeCase(name);
-    if (optional) return `r.is_null ? r.read_null : ${name}Methods.decode_${sn}(r)`;
     return `${name}Methods.decode_${sn}(r)`;
   }
   return "r.read_string";
 }
 
-function generateFieldRead(L: string[], f: { name: string; type: any; optional: boolean }, varName: string, indent: string): void {
-  const tmp = nextTmp();
-  if (f.optional) {
-    L.push(`${indent}if r.is_null then r.read_null; ${varName} = nil; next; end`);
-  }
+function generateFieldRead(f: { name: string; type: any; optional: boolean }): { stmts: string[]; value: string } {
   if (isArrayType(f.type)) {
     const elem = arrayElementType(f.type)!;
-    L.push(`${indent}${tmp} = []`);
-    L.push(`${indent}r.begin_array`);
-    L.push(`${indent}${tmp} << ${readExpr(elem)} while r.has_next_element`);
-    L.push(`${indent}r.end_array`);
-    L.push(`${indent}${varName} = ${tmp}`);
-  } else if (isRecordType(f.type)) {
-    const elem = recordElementType(f.type)!;
-    L.push(`${indent}${tmp} = {}`);
-    L.push(`${indent}r.begin_object`);
-    L.push(`${indent}${tmp}[r.read_field_name] = ${readExpr(elem)} while r.has_next_field`);
-    L.push(`${indent}r.end_object`);
-    L.push(`${indent}${varName} = ${tmp}`);
+    const tmp = nextTmp();
+    const stmts: string[] = [];
+    if (f.optional) {
+      stmts.push(`${tmp} = nil`);
+      stmts.push(`if r.is_null`);
+      stmts.push(`    r.read_null`);
+      stmts.push(`else`);
+      stmts.push(`    ${tmp} = []`);
+      stmts.push(`    r.begin_array`);
+      stmts.push(`    ${tmp} << ${readExpr(elem)} while r.has_next_element`);
+      stmts.push(`    r.end_array`);
+      stmts.push(`end`);
+      return { stmts, value: tmp };
+    } else {
+      stmts.push(`${tmp} = []`);
+      stmts.push(`r.begin_array`);
+      stmts.push(`${tmp} << ${readExpr(elem)} while r.has_next_element`);
+      stmts.push(`r.end_array`);
+      return { stmts, value: tmp };
+    }
   }
+  if (isRecordType(f.type)) {
+    const elem = recordElementType(f.type)!;
+    const tmp = nextTmp();
+    const stmts: string[] = [];
+    if (f.optional) {
+      stmts.push(`${tmp} = nil`);
+      stmts.push(`if r.is_null`);
+      stmts.push(`    r.read_null`);
+      stmts.push(`else`);
+      stmts.push(`    ${tmp} = {}`);
+      stmts.push(`    r.begin_object`);
+      stmts.push(`    ${tmp}[r.read_field_name] = ${readExpr(elem)} while r.has_next_field`);
+      stmts.push(`    r.end_object`);
+      stmts.push(`end`);
+      return { stmts, value: tmp };
+    } else {
+      stmts.push(`${tmp} = {}`);
+      stmts.push(`r.begin_object`);
+      stmts.push(`${tmp}[r.read_field_name] = ${readExpr(elem)} while r.has_next_field`);
+      stmts.push(`r.end_object`);
+      return { stmts, value: tmp };
+    }
+  }
+  if (f.optional && ((f.type.kind === "Model" && (f.type as Model).name) || (f.type.kind === "Union" && (f.type as Union).name))) {
+    const tmp = nextTmp();
+    const stmts: string[] = [];
+    stmts.push(`${tmp} = nil`);
+    stmts.push(`if r.is_null`);
+    stmts.push(`    r.read_null`);
+    stmts.push(`else`);
+    stmts.push(`    ${tmp} = ${readExpr(f.type)}`);
+    stmts.push(`end`);
+    return { stmts, value: tmp };
+  }
+  return { stmts: [], value: readExpr(f.type) };
 }
 
 function emitModelClass(m: Model, L: string[]): void {
@@ -305,15 +342,21 @@ function emitModelClass(m: Model, L: string[]): void {
   L.push(`    obj = ${m.name}.new`);
   L.push(`    while r.has_next_field`);
   L.push(`      key = r.read_field_name`);
+  const decodeResults: { name: string; fRb: string; result: { stmts: string[]; value: string } }[] = [];
   for (const f of fields) {
-    const fRb = fieldRb(f.name);
-    if (isArrayType(f.type) || isRecordType(f.type)) {
-      L.push(`      if key == "${f.name}"`);
-      generateFieldRead(L, f, `obj.${fRb}`, "        ");
+    decodeResults.push({ name: f.name, fRb: fieldRb(f.name), result: generateFieldRead(f) });
+  }
+  for (const { name, fRb, result } of decodeResults) {
+    if (result.stmts.length > 0) {
+      L.push(`      if key == "${name}"`);
+      for (const stmt of result.stmts) {
+        L.push(`        ${stmt}`);
+      }
+      L.push(`        obj.${fRb} = ${result.value}`);
       L.push(`        next`);
       L.push(`      end`);
     } else {
-      L.push(`      if key == "${f.name}" then obj.${fRb} = ${readExpr(f.type, f.optional)}; next; end`);
+      L.push(`      if key == "${name}" then obj.${fRb} = ${result.value}; next; end`);
     }
   }
   L.push(`      r.skip`);
