@@ -2,7 +2,7 @@ import { emitFile } from "@typespec/compiler";
 import { collectServices, extractFields, scalarName, isArrayType, isRecordType, arrayElementType, recordElementType, toSnakeCase, dottedPathToSnakeCase, checkAndReportReservedKeywords, safeFieldName, } from "@specodec/typespec-emitter-core";
 let _tmpCounter = 0;
 function nextTmp() {
-    return `tmp`;
+    return `tmp${_tmpCounter++}`;
 }
 function fieldRb(name) {
     return safeFieldName("ruby", toSnakeCase(name));
