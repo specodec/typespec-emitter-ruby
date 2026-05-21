@@ -27,18 +27,18 @@ function nextTmp(): string {
   return `tmp${_tmpCounter++}`;
 }
 
-function fieldRb(name: string): string {
+export function fieldRb(name: string): string {
   return safeFieldName("ruby", toSnakeCase(name));
 }
 
 // ── RBS type helpers ──────────────────────────────────────────────────────────
 
-function rbsType(type: Type, optional?: boolean): string {
+export function rbsType(type: Type, optional?: boolean): string {
   const base = rbsTypeBase(type);
   return optional ? `${base}?` : base;
 }
 
-function rbsTypeBase(type: Type): string {
+export function rbsTypeBase(type: Type): string {
   const n = scalarName(type);
   if (n) {
     switch (n) {
@@ -140,7 +140,7 @@ function emitUnionRbs(u: UnionInfo, L: string[]): void {
   L.push("");
 }
 
-function rbDefault(type: Type): string {
+export function rbDefault(type: Type): string {
   const n = scalarName(type);
   if (n === "boolean") return "false";
   if (["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "integer"].includes(n)) return "0";
@@ -148,7 +148,7 @@ function rbDefault(type: Type): string {
   return "nil";
 }
 
-function writeLines(type: Type, varExpr: string, indent: string): string[] {
+export function writeLines(type: Type, varExpr: string, indent: string): string[] {
   const n = scalarName(type);
   if (n === "string")
     return [`${indent}w.write_string(${varExpr})`];
@@ -203,7 +203,7 @@ function writeLines(type: Type, varExpr: string, indent: string): string[] {
   return [`${indent}w.write_string(${varExpr}.to_s)`];
 }
 
-function readExpr(type: Type): string {
+export function readExpr(type: Type): string {
   const n = scalarName(type);
   if (n === "string") return "r.read_string";
   if (n === "bytes") return "r.read_bytes";
@@ -228,7 +228,7 @@ function readExpr(type: Type): string {
   return "r.read_string";
 }
 
-function generateFieldRead(f: { name: string; type: any; optional: boolean }): { stmts: string[]; value: string } {
+export function generateFieldRead(f: { name: string; type: any; optional: boolean }): { stmts: string[]; value: string } {
   if (isArrayType(f.type)) {
     const elem = arrayElementType(f.type)!;
     const tmp = nextTmp();
@@ -368,7 +368,7 @@ function emitModelClass(m: Model, L: string[]): void {
   L.push("");
 }
 
-function generateEnumCode(e: EnumInfo): string[] {
+export function generateEnumCode(e: EnumInfo): string[] {
   const lines: string[] = [];
   lines.push(`module ${e.name}`);
   for (const m of e.members) {
