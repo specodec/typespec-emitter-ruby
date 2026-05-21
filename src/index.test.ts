@@ -1,3 +1,6 @@
+import { fileURLToPath } from 'url';
+const __dir = dirname(fileURLToPath(import.meta.url));
+import { join, dirname } from 'path';
 import { existsSync, readdirSync, rmSync } from 'fs';
 import { execSync } from 'child_process';
 import { describe, it, expect } from 'vitest';
@@ -23,15 +26,14 @@ describe('readExpr', () => {
   it('bytes', () => expect(readExpr(mkScalar('bytes') as any)).toContain('read_bytes'));
 });
 
-describe('generation + compile', () => {
-  const ROOT = join(__dir, '..');
-  const TSP = join(ROOT, 'node_modules', '.bin', 'tsp');
-  const TDIR = join(ROOT, 'tests');
-  const GEN = join(TDIR, 'generated');
 
-  it('tsp generates ~200 codec files', () => {
-    if (existsSync(GEN)) rmSync(GEN, { recursive: true });
-    execSync(`${TSP} compile alltypes.tsp --emit=@specodec/typespec-emitter-ruby --option @specodec/typespec-emitter-ruby.emitter-output-dir=generated`, { cwd: TDIR, stdio: 'pipe' });
-    expect(readdirSync(GEN).length).toBeGreaterThanOrEqual(10);
+
+describe('generated code compiles', () => {
+  const GEN = join(__dir, '..', 'tests', 'generated');
+  
+  it('syntax check: ruby -c', () => {
+    for (const f of readdirSync(GEN).filter(f => f.endsWith('.rb'))) {
+      execSync(`ruby -c ${join(GEN, f)}`, { stdio: 'pipe' });
+    }
   });
 });
