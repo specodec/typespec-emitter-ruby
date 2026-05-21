@@ -1,0 +1,7 @@
+{
+  "name": "specodec-emitter-ruby-tests",
+  "private": true,
+  "dependencies": {
+    "@specodec/typespec-emitter-ruby": "file:.."
+  }
+}
